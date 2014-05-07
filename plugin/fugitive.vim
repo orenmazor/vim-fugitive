@@ -1612,6 +1612,231 @@ augroup fugitive_remove
 augroup END
 
 " }}}1
+" Gpraise {{{1
+
+augroup fugitive_praise
+  autocmd!
+  autocmd BufReadPost *.fugitivepraise setfiletype fugitivepraise
+  autocmd FileType fugitivepraise setlocal nomodeline | if exists('b:git_dir') | let &l:keywordprg = s:repo().keywordprg() | endif
+  autocmd Syntax fugitivepraise call s:PraiseSyntax()
+  autocmd User Fugitive if s:buffer().type('file', 'blob') | exe "command! -buffer -bar -bang -range=0 -nargs=* Gpraise :execute s:Praise(<bang>0,<line1>,<line2>,<count>,[<f-args>])" | endif
+augroup END
+
+function! s:linechars(pattern) abort
+  let chars = strlen(s:gsub(matchstr(getline('.'), a:pattern), '.', '.'))
+  if exists('*synconcealed') && &conceallevel > 1
+    for col in range(1, chars)
+      let chars -= synconcealed(line('.'), col)[0]
+    endfor
+  endif
+  return chars
+endfunction
+
+function! s:Praise(bang,line1,line2,count,args) abort
+  try
+    if s:buffer().path() == ''
+      call s:throw('file or blob required')
+    endif
+    if filter(copy(a:args),'v:val !~# "^\\%(--root\|--show-name\\|-\\=\\%([ltfnsew]\\|[MC]\\d*\\)\\+\\)$"') != []
+      call s:throw('unsupported option')
+    endif
+    call map(a:args,'s:sub(v:val,"^\\ze[^-]","-")')
+    let cmd = ['--no-pager', 'blame', '--show-number'] + a:args
+    if s:buffer().commit() =~# '\D\|..'
+      let cmd += [s:buffer().commit()]
+    else
+      let cmd += ['--contents', '-']
+    endif
+    let cmd += ['--', s:buffer().path()]
+    let basecmd = escape(call(s:repo().git_command,cmd,s:repo()),'!')
+    try
+      let cd = exists('*haslocaldir') && haslocaldir() ? 'lcd ' : 'cd '
+      if !s:repo().bare()
+        let dir = getcwd()
+        execute cd.'`=s:repo().tree()`'
+      endif
+      if a:count
+        execute 'write !'.substitute(basecmd,' blame ',' blame -L '.a:line1.','.a:line2.' ','g')
+      else
+        let error = resolve(tempname())
+        let temp = error.'.fugitivepraise'
+        if &shell =~# 'csh'
+          silent! execute '%write !('.basecmd.' > '.temp.') >& '.error
+        else
+          silent! execute '%write !'.basecmd.' > '.temp.' 2> '.error
+        endif
+        if exists('l:dir')
+          execute cd.'`=dir`'
+          unlet dir
+        endif
+        if v:shell_error
+          call s:throw(join(readfile(error),"\n"))
+        endif
+        for winnr in range(winnr('$'),1,-1)
+          call setwinvar(winnr, '&scrollbind', 0)
+          if getbufvar(winbufnr(winnr), 'fugitive_praised_bufnr')
+            execute winbufnr(winnr).'bdelete'
+          endif
+        endfor
+        let bufnr = bufnr('')
+        let restore = 'call setwinvar(bufwinnr('.bufnr.'),"&scrollbind",0)'
+        if &l:wrap
+          let restore .= '|call setwinvar(bufwinnr('.bufnr.'),"&wrap",1)'
+        endif
+        if &l:foldenable
+          let restore .= '|call setwinvar(bufwinnr('.bufnr.'),"&foldenable",1)'
+        endif
+        setlocal scrollbind nowrap nofoldenable
+        let top = line('w0') + &scrolloff
+        let current = line('.')
+        let s:temp_files[temp] = { 'dir': s:repo().dir(), 'args': cmd }
+        exe 'keepalt leftabove vsplit '.temp
+        let b:fugitive_praised_bufnr = bufnr
+        let w:fugitive_leave = restore
+        let b:fugitive_praise_arguments = join(a:args,' ')
+        execute top
+        normal! zt
+        execute current
+        setlocal nomodified nomodifiable nonumber scrollbind nowrap foldcolumn=0 nofoldenable winfixwidth filetype=fugitivepraise
+        if exists('+concealcursor')
+          setlocal concealcursor=nc conceallevel=2
+        endif
+        if exists('+relativenumber')
+          setlocal norelativenumber
+        endif
+        execute "vertical resize ".(s:linechars('.\{-\}\ze\s\+\d\+)')+1)
+        nnoremap <buffer> <silent> <F1> :help fugitive-:Gpraise<CR>
+        nnoremap <buffer> <silent> g?   :help fugitive-:Gpraise<CR>
+        nnoremap <buffer> <silent> q    :exe substitute(bufwinnr(b:fugitive_praised_bufnr).' wincmd w<Bar>'.bufnr('').'bdelete','^-1','','')<CR>
+        nnoremap <buffer> <silent> gq   :exe substitute(bufwinnr(b:fugitive_praised_bufnr).' wincmd w<Bar>'.bufnr('').'bdelete<Bar>if expand("%:p") =~# "^fugitive:[\\/][\\/]"<Bar>Gedit<Bar>endif','^-1','','')<CR>
+        nnoremap <buffer> <silent> <CR> :<C-U>exe <SID>PraiseCommit("exe 'norm q'<Bar>edit")<CR>
+        nnoremap <buffer> <silent> -    :<C-U>exe <SID>PraiseJump('')<CR>
+        nnoremap <buffer> <silent> P    :<C-U>exe <SID>PraiseJump('^'.v:count1)<CR>
+        nnoremap <buffer> <silent> ~    :<C-U>exe <SID>PraiseJump('~'.v:count1)<CR>
+        nnoremap <buffer> <silent> i    :<C-U>exe <SID>PraiseCommit("exe 'norm q'<Bar>edit")<CR>
+        nnoremap <buffer> <silent> o    :<C-U>exe <SID>PraiseCommit((&splitbelow ? "botright" : "topleft")." split")<CR>
+        nnoremap <buffer> <silent> O    :<C-U>exe <SID>PraiseCommit("tabedit")<CR>
+        nnoremap <buffer> <silent> A    :<C-u>exe "vertical resize ".(<SID>linechars('.\{-\}\ze [0-9:/+-][0-9:/+ -]* \d\+)')+1+v:count)<CR>
+        nnoremap <buffer> <silent> C    :<C-u>exe "vertical resize ".(<SID>linechars('^\S\+')+1+v:count)<CR>
+        nnoremap <buffer> <silent> D    :<C-u>exe "vertical resize ".(<SID>linechars('.\{-\}\ze\d\ze\s\+\d\+)')+1-v:count)<CR>
+        redraw
+        syncbind
+      endif
+    finally
+      if exists('l:dir')
+        execute cd.'`=dir`'
+      endif
+    endtry
+    return ''
+  catch /^fugitive:/
+    return 'echoerr v:errmsg'
+  endtry
+endfunction
+
+function! s:PraiseCommit(cmd) abort
+  let cmd = s:Edit(a:cmd, 0, matchstr(getline('.'),'\x\+'))
+  if cmd =~# '^echoerr'
+    return cmd
+  endif
+  let lnum = matchstr(getline('.'),' \zs\d\+\ze\s\+[([:digit:]]')
+  let path = matchstr(getline('.'),'^\^\=\x\+\s\+\zs.\{-\}\ze\s*\d\+ ')
+  if path ==# ''
+    let path = s:buffer(b:fugitive_praised_bufnr).path()
+  endif
+  execute cmd
+  if search('^diff .* b/\M'.escape(path,'\').'$','W')
+    call search('^+++')
+    let head = line('.')
+    while search('^@@ \|^diff ') && getline('.') =~# '^@@ '
+      let top = +matchstr(getline('.'),' +\zs\d\+')
+      let len = +matchstr(getline('.'),' +\d\+,\zs\d\+')
+      if lnum >= top && lnum <= top + len
+        let offset = lnum - top
+        if &scrolloff
+          +
+          normal! zt
+        else
+          normal! zt
+          +
+        endif
+        while offset > 0 && line('.') < line('$')
+          +
+          if getline('.') =~# '^[ +]'
+            let offset -= 1
+          endif
+        endwhile
+        return 'if foldlevel(".")|foldopen!|endif'
+      endif
+    endwhile
+    execute head
+    normal! zt
+  endif
+  return ''
+endfunction
+
+function! s:PraiseJump(suffix) abort
+  let commit = matchstr(getline('.'),'^\^\=\zs\x\+')
+  if commit =~# '^0\+$'
+    let commit = ':0'
+  endif
+  let lnum = matchstr(getline('.'),' \zs\d\+\ze\s\+[([:digit:]]')
+  let path = matchstr(getline('.'),'^\^\=\x\+\s\+\zs.\{-\}\ze\s*\d\+ ')
+  if path ==# ''
+    let path = s:buffer(b:fugitive_praised_bufnr).path()
+  endif
+  let args = b:fugitive_praise_arguments
+  let offset = line('.') - line('w0')
+  let bufnr = bufnr('%')
+  let winnr = bufwinnr(b:fugitive_praised_bufnr)
+  if winnr > 0
+    exe winnr.'wincmd w'
+  endif
+  execute s:Edit('edit', 0, commit.a:suffix.':'.path)
+  execute lnum
+  if winnr > 0
+    exe bufnr.'bdelete'
+  endif
+  execute 'Gpraise '.args
+  execute lnum
+  let delta = line('.') - line('w0') - offset
+  if delta > 0
+    execute 'normal! '.delta."\<C-E>"
+  elseif delta < 0
+    execute 'normal! '.(-delta)."\<C-Y>"
+  endif
+  syncbind
+  return ''
+endfunction
+
+function! s:PraiseSyntax() abort
+  let b:current_syntax = 'fugitivepraise'
+  let conceal = has('conceal') ? ' conceal' : ''
+  let arg = exists('b:fugitive_praise_arguments') ? b:fugitive_praise_arguments : ''
+  syn match FugitivepraiseBoundary "^\^"
+  syn match FugitivepraiseBlank                      "^\s\+\s\@=" nextgroup=FugitivepraiseAnnotation,fugitivepraiseOriginalFile,FugitivepraiseOriginalLineNumber skipwhite
+  syn match FugitivepraiseHash       "\%(^\^\=\)\@<=\x\{7,40\}\>" nextgroup=FugitivepraiseAnnotation,FugitivepraiseOriginalLineNumber,fugitivepraiseOriginalFile skipwhite
+  syn match FugitivepraiseUncommitted "\%(^\^\=\)\@<=0\{7,40\}\>" nextgroup=FugitivepraiseAnnotation,FugitivepraiseOriginalLineNumber,fugitivepraiseOriginalFile skipwhite
+  syn region FugitivepraiseAnnotation matchgroup=FugitivepraiseDelimiter start="(" end="\%( \d\+\)\@<=)" contained keepend oneline
+  syn match FugitivepraiseTime "[0-9:/+-][0-9:/+ -]*[0-9:/+-]\%( \+\d\+)\)\@=" contained containedin=FugitivepraiseAnnotation
+  exec 'syn match FugitivepraiseLineNumber         " *\d\+)\@=" contained containedin=FugitivepraiseAnnotation'.conceal
+  exec 'syn match FugitivepraiseOriginalFile       " \%(\f\+\D\@<=\|\D\@=\f\+\)\%(\%(\s\+\d\+\)\=\s\%((\|\s*\d\+)\)\)\@=" contained nextgroup=FugitivepraiseOriginalLineNumber,FugitivepraiseAnnotation skipwhite'.(arg =~# 'f' ? '' : conceal)
+  exec 'syn match FugitivepraiseOriginalLineNumber " *\d\+\%(\s(\)\@=" contained nextgroup=FugitivepraiseAnnotation skipwhite'.(arg =~# 'n' ? '' : conceal)
+  exec 'syn match FugitivepraiseOriginalLineNumber " *\d\+\%(\s\+\d\+)\)\@=" contained nextgroup=FugitivepraiseShort skipwhite'.(arg =~# 'n' ? '' : conceal)
+  syn match FugitivepraiseShort              " \d\+)" contained contains=FugitivepraiseLineNumber
+  syn match FugitivepraiseNotCommittedYet "(\@<=Not Committed Yet\>" contained containedin=FugitivepraiseAnnotation
+  hi def link FugitivepraiseBoundary           Keyword
+  hi def link FugitivepraiseHash               Identifier
+  hi def link FugitivepraiseUncommitted        Function
+  hi def link FugitivepraiseTime               PreProc
+  hi def link FugitivepraiseLineNumber         Number
+  hi def link FugitivepraiseOriginalFile       String
+  hi def link FugitivepraiseOriginalLineNumber Float
+  hi def link FugitivepraiseShort              FugitivepraiseDelimiter
+  hi def link FugitivepraiseDelimiter          Delimiter
+  hi def link FugitivepraiseNotCommittedYet    Comment
+endfunction
+
+" }}}1
 " Gblame {{{1
 
 augroup fugitive_blame
